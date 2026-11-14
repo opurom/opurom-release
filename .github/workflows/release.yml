@@ -1,0 +1,249 @@
+name: Release train
+
+# One version for the whole framework. This workflow is the only release
+# authority: it evaluates the departure rules hourly, then tags every
+# framework repository at its verified head and publishes one release here.
+# Framework repositories run CI only; they never tag or release themselves.
+
+on:
+  schedule:
+    - cron: '18 * * * *'
+  workflow_dispatch:
+  # A product repository's CI went green on main; re-evaluate immediately.
+  # The dispatch itself carries no truth: the gate recomputes everything
+  # from the current tags, and the concurrency lock serializes overlapping
+  # pings so a second run always sees the first run's tag.
+  repository_dispatch:
+    types: [ci-green]
+
+# One train at a time: overlapping hourly scans and CI-green pings queue up
+# instead of racing, and a queued run re-reads the window before deciding.
+concurrency:
+  group: release-train
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  ORG: opurom
+  # Repositories tagged by a train: everything the framework snapshot covers.
+  TRAIN_REPOS: opurom-cli opurom-core opurom-db opurom-debug opurom-gpu opurom-ide-plugins opurom-lang opurom-lsp opurom-mobile opurom-pkg opurom-platform opurom-plugins opurom-render opurom-runtime-adapters opurom-server opurom-web
+  # Repositories whose eligible commits drive the schedule. content packages ride the
+  # train but does not count: they are assets and churn too fast.
+  COUNT_REPOS: opurom-cli opurom-core opurom-db opurom-debug opurom-gpu opurom-ide-plugins opurom-lang opurom-lsp opurom-mobile opurom-pkg opurom-platform opurom-plugins opurom-render opurom-runtime-adapters opurom-server opurom-web
+  RELEASE_TOKEN: ${{ secrets.RELEASE_TRAIN_TOKEN }}
+  GH_TOKEN: ${{ secrets.RELEASE_TRAIN_TOKEN }}
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    outputs:
+      depart: ${{ steps.gate.outputs.release }}
+      tag: ${{ steps.version.outputs.tag }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Collect fleet commits since the last train
+        id: fleet
+        run: |
+          set -euo pipefail
+          LAST=$(git tag --list 'v*' --sort=-v:refname | head -1 || true)
+          echo "last=${LAST:-none}" >> "$GITHUB_OUTPUT"
+          # The exact head SHA of every repository at the previous train is the
+          # window boundary: commits are counted from that SHA, not from a
+          # timestamp, so late-pushed commits never straddle a window.
+          git show "$LAST:.github/train-state.json" > /tmp/train-state.json 2>/dev/null || echo '{}' > /tmp/train-state.json
+          echo '[' > /tmp/fleet.json
+          echo '{' > /tmp/new-state.json
+          first=1
+          ffirst=1
+          for repo in $COUNT_REPOS; do
+            head_sha=$(gh api "repos/$ORG/$repo/commits/main" --jq '.sha' 2>/dev/null) || { echo "skip $repo (no main)"; continue; }
+            [ "$first" = "0" ] && echo ',' >> /tmp/new-state.json
+            first=0
+            printf '"%s":"%s"' "$repo" "$head_sha" >> /tmp/new-state.json
+            base=$(jq -r --arg r "$repo" '.[$r] // ""' /tmp/train-state.json)
+            if [ -n "$base" ] && [ -n "$LAST" ]; then
+              subjects=$(gh api "repos/$ORG/$repo/compare/$base...$(echo "$head_sha" | cut -c1-12)" \
+                --paginate --jq '[.commits[] | select(.parents | length == 1) | {sha: .sha, message: .commit.message | split("\n")[0]}]' 2>/dev/null || echo '[]')
+            else
+              subjects=$(gh api "repos/$ORG/$repo/commits?sha=$head_sha&per_page=100" \
+                --paginate --jq '[.[] | select(.parents | length == 1) | {sha: .sha, message: .commit.message | split("\n")[0]}]' 2>/dev/null || echo '[]')
+            fi
+            [ "$ffirst" = "0" ] && echo ',' >> /tmp/fleet.json
+            ffirst=0
+            printf '{"repo":"%s","subjects":%s}\n' "$repo" "$subjects" >> /tmp/fleet.json
+          done
+          echo '}' >> /tmp/new-state.json
+          echo ']' >> /tmp/fleet.json
+          cp /tmp/fleet.json /tmp/fleet-fleet.json
+          jq 'map(.subjects | length) | add' /tmp/fleet.json
+
+      - name: Departure gate
+        id: gate
+        run: |
+          set -euo pipefail
+          LAST="${{ steps.fleet.outputs.last }}"
+          if [ "$LAST" != "none" ]; then
+            HOURS=$(( ( $(date +%s) - $(git log -1 --format='%ct' "$LAST") ) / 3600 ))
+          else
+            HOURS=999999
+          fi
+          # Channel 1: the VERSION file changed since the last train. VERSION
+          # always names the series in development; bumping it (0.1.0 -> 0.1.1
+          # or 0.2.0) means the previous series is finalized NOW: this train
+          # tags the previous series' bare version (v0.1.0), and later trains
+          # continue as v0.1.1-dev.1 / v0.2.0-dev.1. Green CI still applies.
+          CUR_VERSION=$(cat VERSION)
+          OLD_VERSION=$(git show "$LAST:VERSION" 2>/dev/null || echo "$CUR_VERSION")
+          if [ "$LAST" != "none" ] && [ "$CUR_VERSION" != "$OLD_VERSION" ]; then
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            echo "reason=series finalized: $OLD_VERSION shipped as its bare version, next trains build $CUR_VERSION-dev.N" >> "$GITHUB_OUTPUT"
+            echo "final_version=$OLD_VERSION" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          RELEASE_MIN_BATCH=50 RELEASE_MAX_HOURS=24 GITHUB_EVENT_NAME="${{ github.event_name }}" \
+          node tools/release-gate.mjs <<EOF > gate.out
+          $(jq -r '.[] | .subjects[]' /tmp/fleet.json)
+          EOF
+          cat gate.out
+          grep -q '^release=true' gate.out && echo "release=true" >> "$GITHUB_OUTPUT" || echo "release=false" >> "$GITHUB_OUTPUT"
+
+      - name: Save fleet subjects and state for the release notes
+        if: steps.gate.outputs.release == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fleet-subjects
+          path: |
+            /tmp/fleet.json
+            /tmp/new-state.json
+
+      - name: Verify every repository is green
+        if: steps.gate.outputs.release == 'true'
+        run: |
+          set -euo pipefail
+          # A CI run still in progress waits for completion (up to 20 min) instead
+          # of instantly holding the train: an emergency fix pushed minutes ago
+          # would otherwise be held just because its run had not finished yet.
+          for repo in $TRAIN_REPOS; do
+            sha=$(gh api "repos/$ORG/$repo/commits/main" --jq '.sha')
+            concl=""
+            for try in $(seq 1 40); do
+              run=$(gh api "repos/$ORG/$repo/actions/runs?head_sha=$sha&per_page=1" --jq '.workflow_runs[0]')
+              concl=$(printf '%s' "$run" | jq -r '.conclusion // (.status // "unknown")')
+              [ "$concl" = "completed" ] && { sleep 30; continue; }
+              case "$concl" in
+                success) break ;;
+                failure|cancelled|timed_out) break ;;
+                *) sleep 30 ;;
+              esac
+            done
+            echo "$repo @$sha: $concl"
+            [ "$concl" = "success" ] || { echo "::error::$repo is not green ($concl); train held"; exit 1; }
+          done
+
+      - name: Compute next train version
+        id: version
+        if: steps.gate.outputs.release == 'true'
+        env:
+          FINAL_VERSION: ${{ steps.gate.outputs.final_version }}
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+          if [ -n "$FINAL_VERSION" ]; then
+            # series finalized: tag the previous series' bare version
+            TAG="v$FINAL_VERSION"
+          else
+            TAG=$(git tag --list 'v*' | node tools/next-version.mjs)
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          if printf '%s' "$TAG" | grep -qE -- '-dev\.'; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  depart:
+    needs: evaluate
+    if: needs.evaluate.outputs.depart == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: fleet-subjects
+          path: /tmp
+      - name: Record the fleet state for the next train
+        run: |
+          set -euo pipefail
+          cp /tmp/new-state.json .github/train-state.json
+          git add .github/train-state.json
+          GIT_AUTHOR_DATE="$(date -Iseconds)" GIT_COMMITTER_DATE="$(date -Iseconds)" \
+            git commit -q -m "chore: record fleet state for ${{ needs.evaluate.outputs.tag }}" || echo "state unchanged"
+          git push origin main
+
+      - name: Generate release notes
+        run: |
+          node tools/release-notes.mjs < /tmp/fleet.json > notes.md
+          cat notes.md
+
+      - name: Tag every framework repository and notify it
+        run: |
+          set -euo pipefail
+          TAG="${{ needs.evaluate.outputs.tag }}"
+          # snapshot every repository, changed or not: a train covers all
+          for repo in $TRAIN_REPOS; do
+            sha=$(gh api "repos/$ORG/$repo/commits/main" --jq '.sha')
+            if gh api "repos/$ORG/$repo/git/refs/tags/$TAG" >/dev/null 2>&1; then
+              echo "$repo already has $TAG"; continue
+            fi
+            gh api -X POST "repos/$ORG/$repo/git/refs" \
+              -f ref="refs/tags/$TAG" -f sha="$sha" \
+              && echo "$repo tagged $TAG @$sha"
+            # API-created tags fire no events; wake the repository so its own
+            # release workflow publishes its changelog for this tag. A failure
+            # here (repository absent, no workflow) must not fail the train.
+            gh api -X POST "repos/$ORG/$repo/dispatches" \
+              -f event_type=train-tagged \
+              -f 'client_payload[tag]=$TAG' \
+              -f 'client_payload[sha]=$sha' >/dev/null 2>&1 \
+              && echo "$repo notified" || echo "::warning::$repo dispatch skipped"
+          done
+
+      - name: Tag this repository
+        run: |
+          TAG="${{ needs.evaluate.outputs.tag }}"
+          git tag "$TAG" && git push origin "$TAG"
+
+      - name: Build source archives for every repository
+        run: |
+          set -euo pipefail
+          TAG="${{ needs.evaluate.outputs.tag }}"
+          VER="${TAG#v}"
+          mkdir -p dist
+          for repo in $TRAIN_REPOS; do
+            # shallow clone each repository and archive its tree
+            git clone --depth 1 --branch "$TAG" "https://github.com/$ORG/$repo.git" "/tmp/arch/$repo" 2>/dev/null \
+              || git clone --depth 1 "https://github.com/$ORG/$repo.git" "/tmp/arch/$repo"
+            git -C "/tmp/arch/$repo" archive --format=tar.gz --prefix="$repo-$VER/" HEAD \
+              > "dist/$repo-$VER.tar.gz"
+          done
+          # the full bundle: all repositories in one archive
+          mkdir -p "/tmp/full/opurom-$VER"
+          for repo in $TRAIN_REPOS; do
+            cp -R "/tmp/arch/$repo" "/tmp/full/opurom-$VER/$repo"
+          done
+          tar --exclude='*/.git' -czf "dist/opurom-full-$VER.tar.gz" -C /tmp/full "opurom-$VER"
+          ls -la dist/
+
+      - name: Publish the train release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.evaluate.outputs.tag }}
+          name: Opurom ${{ needs.evaluate.outputs.tag }}
+          generate_release_notes: false
+          prerelease: ${{ needs.evaluate.outputs.prerelease == 'true' }}
+          body_path: notes.md
+          files: dist/*.tar.gz
