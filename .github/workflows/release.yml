@@ -207,8 +207,8 @@ jobs:
             # here (repository absent, no workflow) must not fail the train.
             gh api -X POST "repos/$ORG/$repo/dispatches" \
               -f event_type=train-tagged \
-              -f 'client_payload[tag]=$TAG' \
-              -f 'client_payload[sha]=$sha' >/dev/null 2>&1 \
+              -f "client_payload[tag]=$TAG" \
+              -f "client_payload[sha]=$sha" >/dev/null 2>&1 \
               && echo "$repo notified" || echo "::warning::$repo dispatch skipped"
           done
 
