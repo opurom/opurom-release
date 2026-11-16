@@ -308,4 +308,7 @@ jobs:
           generate_release_notes: false
           prerelease: ${{ needs.evaluate.outputs.prerelease == 'true' }}
           body_path: notes.md
-          files: dist/*.tar.gz dist/update-channel.json dist/update-channel.json.sig
+          files: |
+            dist/*.tar.gz
+            dist/update-channel.json
+            dist/update-channel.json.sig
