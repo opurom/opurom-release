@@ -10,6 +10,7 @@
 // three-bucket body without a repository heading. The sub-repository
 // release workflow uses this mode.
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 
 const sentence = (s) => {
   const first = s.split(/\s+/)[0] || '';
@@ -75,6 +76,13 @@ let input = '';
 process.stdin.on('data', (c) => { input += c; });
 process.stdin.on('end', () => {
   const fleet = JSON.parse(input);
+  // Optional expansion fleet: content-package commits listed under their own
+  // heading, never mixed into the product changelog.
+  const ei = process.argv.indexOf('--expansion');
+  let expansion = [];
+  if (ei >= 0 && process.argv[ei + 1]) {
+    try { expansion = JSON.parse(readFileSync(process.argv[ei + 1], 'utf8')); } catch { expansion = []; }
+  }
   // Aggregate across repositories into the three standard buckets; each
   // entry links to its source commit.
   const b = { Features: [], Changes: [], Fixes: [] };
@@ -89,5 +97,21 @@ process.stdin.on('end', () => {
     if (b[h].length) parts.push(`### ${h}\n\n${b[h].join('\n')}`);
   }
   if (!parts.length) parts.push('No eligible changes since the previous train.');
+  // Expansion: content packages (theme, icons, examples) ship with the train but
+  // keep their own section so they never blur the product changelog.
+  if (expansion.length) {
+    const e = { Features: [], Changes: [], Fixes: [] };
+    for (const { repo, subjects } of expansion) {
+      const grouped = group(subjects, repo);
+      for (const h of ['Features', 'Changes', 'Fixes']) {
+        e[h].push(...grouped[h]);
+      }
+    }
+    const eparts = [];
+    for (const h of ['Features', 'Changes', 'Fixes']) {
+      if (e[h].length) eparts.push(`#### ${h}\n\n${e[h].join('\n')}`);
+    }
+    if (eparts.length) parts.push(`### Expansion\n\n${eparts.join('\n\n')}`);
+  }
   process.stdout.write(parts.join('\n\n') + '\n');
 });

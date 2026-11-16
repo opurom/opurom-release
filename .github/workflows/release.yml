@@ -28,10 +28,15 @@ permissions:
 env:
   ORG: opurom
   # Repositories tagged by a train: everything the framework snapshot covers.
-  TRAIN_REPOS: opurom-cli opurom-core opurom-db opurom-debug opurom-gpu opurom-ide-plugins opurom-lang opurom-lsp opurom-mobile opurom-pkg opurom-platform opurom-plugins opurom-render opurom-runtime-adapters opurom-server opurom-web
+  # The three expansion repositories are appended so they are tagged, archived
+  # and bundled with every train; their notes ride a separate Expansion section.
+  TRAIN_REPOS: opurom-cli opurom-core opurom-db opurom-debug opurom-gpu opurom-ide-plugins opurom-lang opurom-lsp opurom-mobile opurom-pkg opurom-platform opurom-plugins opurom-render opurom-runtime-adapters opurom-server opurom-web opurom-ui opurom-icons opurom-examples
   # Repositories whose eligible commits drive the schedule. content packages ride the
   # train but does not count: they are assets and churn too fast.
   COUNT_REPOS: opurom-cli opurom-core opurom-db opurom-debug opurom-gpu opurom-ide-plugins opurom-lang opurom-lsp opurom-mobile opurom-pkg opurom-platform opurom-plugins opurom-render opurom-runtime-adapters opurom-server opurom-web
+  # Expansion repositories: tagged and bundled with the train, but their commits
+  # never arm the gate and are listed under a dedicated Expansion heading.
+  ASSET_REPOS: opurom-ui opurom-icons opurom-examples
   RELEASE_TOKEN: ${{ secrets.RELEASE_TRAIN_TOKEN }}
   GH_TOKEN: ${{ secrets.RELEASE_TRAIN_TOKEN }}
 
@@ -76,9 +81,30 @@ jobs:
             ffirst=0
             printf '{"repo":"%s","subjects":%s}\n' "$repo" "$subjects" >> /tmp/fleet.json
           done
-          echo '}' >> /tmp/new-state.json
           echo ']' >> /tmp/fleet.json
           cp /tmp/fleet.json /tmp/fleet-fleet.json
+          # Expansion repositories: same window, but their subjects feed a
+          # separate notes section and never arm the gate. Their heads are still
+          # recorded in train-state so the next window has a base for them.
+          echo '[' > /tmp/expansion.json
+          efirst=1
+          for repo in $ASSET_REPOS; do
+            head_sha=$(gh api "repos/$ORG/$repo/commits/main" --jq '.sha' 2>/dev/null) || { echo "skip $repo (no main)"; continue; }
+            printf ',"%s":"%s"' "$repo" "$head_sha" >> /tmp/new-state.json
+            base=$(jq -r --arg r "$repo" '.[$r] // ""' /tmp/train-state.json)
+            if [ -n "$base" ] && [ -n "$LAST" ]; then
+              subjects=$(gh api "repos/$ORG/$repo/compare/$base...$(echo "$head_sha" | cut -c1-12)" \
+                --paginate --jq '[.commits[] | select(.parents | length == 1) | {sha: .sha, message: .commit.message | split("\n")[0]}]' 2>/dev/null || echo '[]')
+            else
+              subjects=$(gh api "repos/$ORG/$repo/commits?sha=$head_sha&per_page=100" \
+                --paginate --jq '[.[] | select(.parents | length == 1) | {sha: .sha, message: .commit.message | split("\n")[0]}]' 2>/dev/null || echo '[]')
+            fi
+            [ "$efirst" = "0" ] && echo ',' >> /tmp/expansion.json
+            efirst=0
+            printf '{"repo":"%s","subjects":%s}\n' "$repo" "$subjects" >> /tmp/expansion.json
+          done
+          echo '}' >> /tmp/new-state.json
+          echo ']' >> /tmp/expansion.json
           jq 'map(.subjects | length) | add' /tmp/fleet.json
 
       - name: Departure gate
@@ -118,6 +144,7 @@ jobs:
           name: fleet-subjects
           path: |
             /tmp/fleet.json
+            /tmp/expansion.json
             /tmp/new-state.json
 
       - name: Verify every repository is green
@@ -186,7 +213,7 @@ jobs:
 
       - name: Generate release notes
         run: |
-          node tools/release-notes.mjs < /tmp/fleet.json > notes.md
+          node tools/release-notes.mjs --expansion /tmp/expansion.json < /tmp/fleet.json > notes.md
           cat notes.md
 
       - name: Tag every framework repository and notify it
