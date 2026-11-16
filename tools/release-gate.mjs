@@ -17,6 +17,7 @@
 // lines, so a workflow can append stdout to $GITHUB_OUTPUT. A non-releasing
 // run is a normal outcome, not a failed job.
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 
 const ELIGIBLE = /^(feat|fix|refactor|perf|revert)(\([^)]+\))?!?:/;
 const MIN_BATCH = Number(process.env.RELEASE_MIN_BATCH ?? 5);
@@ -52,10 +53,25 @@ if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
   const head = git(['rev-parse', 'HEAD']);
   let last = null;
   try { last = git(['describe', '--tags', '--abbrev=0', head]); } catch { /* no tags yet */ }
-  const range = last ? `${last}..${head}` : head;
-  const subjects = git(['log', range, '--no-merges', '--format=%s'])
-    .split('\n').map(s => s.trim()).filter(Boolean);
-  const headSubject = git(['log', '-1', '--format=%s', head]);
+  // Prefer the fleet subjects the workflow feeds on stdin: every product
+  // repository's eligible commits since the last train, concatenated. Only
+  // fall back to this repository's own log when stdin carries nothing (local
+  // runs, or a workflow that did not collect a fleet).
+  let subjects = [];
+  try {
+    const stdin = readFileSync(0, 'utf8');
+    subjects = stdin.split('\n').map(s => s.trim()).filter(Boolean);
+  } catch { /* no stdin */ }
+  if (subjects.length === 0) {
+    const range = last ? `${last}..${head}` : head;
+    subjects = git(['log', range, '--no-merges', '--format=%s'])
+      .split('\n').map(s => s.trim()).filter(Boolean);
+  }
+  // The head subject is whatever landed last in the fleet window; with no
+  // fleet, this repository's own head.
+  const headSubject = subjects.length > 0
+    ? subjects[subjects.length - 1]
+    : git(['log', '-1', '--format=%s', head]);
   const hours = last
     ? (Date.now() / 1000 - Number(git(['log', '-1', '--format=%ct', last]))) / 3600
     : Infinity;

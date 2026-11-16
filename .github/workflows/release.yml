@@ -108,9 +108,6 @@ jobs:
           done
           echo '}' >> /tmp/new-state.json
           echo ']' >> /tmp/expansion.json
-          echo "=== fleet repos collected ==="
-          jq -r '.[] | "\(.repo): \(.subjects|length)"' /tmp/fleet.json
-          echo "=== total commit count ==="
           jq 'map(.subjects | length) | add' /tmp/fleet.json
 
       - name: Departure gate
