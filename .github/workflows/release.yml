@@ -135,7 +135,7 @@ jobs:
           fi
           RELEASE_MIN_BATCH=50 RELEASE_MAX_HOURS=24 GITHUB_EVENT_NAME="${{ github.event_name }}" \
           node tools/release-gate.mjs <<EOF > gate.out
-          $(jq -r '.[] | .subjects[]' /tmp/fleet.json)
+          $(jq -r '.[] | .subjects[] | .message' /tmp/fleet.json)
           EOF
           cat gate.out
           grep -q '^release=true' gate.out && echo "release=true" >> "$GITHUB_OUTPUT" || echo "release=false" >> "$GITHUB_OUTPUT"
