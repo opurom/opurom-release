@@ -211,10 +211,17 @@ jobs:
       - name: Record the fleet state for the next train
         run: |
           set -euo pipefail
+          # A runner has no git identity by default; without it every commit
+          # here fails and the window boundary is silently lost, so the next
+          # gate counts the whole history again.
+          git config user.name "opurom-release-bot"
+          git config user.email "release@opurom.local"
           cp /tmp/new-state.json .github/train-state.json
           git add .github/train-state.json
-          GIT_AUTHOR_DATE="$(date -Iseconds)" GIT_COMMITTER_DATE="$(date -Iseconds)" \
-            git commit -q -m "chore: record fleet state for ${{ needs.evaluate.outputs.tag }}" || echo "state unchanged"
+          if ! git diff --cached --quiet; then
+            GIT_AUTHOR_DATE="$(date -Iseconds)" GIT_COMMITTER_DATE="$(date -Iseconds)" \
+              git commit -q -m "chore: record fleet state for ${{ needs.evaluate.outputs.tag }}"
+          fi
           git push origin main
 
       - name: Generate release notes
