@@ -61,8 +61,13 @@ jobs:
           echo "last=${LAST:-none}" >> "$GITHUB_OUTPUT"
           # The exact head SHA of every repository at the previous train is the
           # window boundary: commits are counted from that SHA, not from a
-          # timestamp, so late-pushed commits never straddle a window.
-          git show "$LAST:.github/train-state.json" > /tmp/train-state.json 2>/dev/null || echo '{}' > /tmp/train-state.json
+          # timestamp, so late-pushed commits never straddle a window. The
+          # boundary is committed to main right before tagging, so HEAD carries
+          # the latest state even when the previous tag predates the file; the
+          # tag copy is only a fallback for checkouts older than that commit.
+          git show "HEAD:.github/train-state.json" > /tmp/train-state.json 2>/dev/null \
+            || git show "$LAST:.github/train-state.json" > /tmp/train-state.json 2>/dev/null \
+            || echo '{}' > /tmp/train-state.json
           echo '[' > /tmp/fleet.json
           echo '{' > /tmp/new-state.json
           first=1
