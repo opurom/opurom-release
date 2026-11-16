@@ -80,10 +80,12 @@ jobs:
             base=$(jq -r --arg r "$repo" '.[$r] // ""' /tmp/train-state.json)
             if [ -n "$base" ] && [ -n "$LAST" ]; then
               subjects=$(gh api "repos/$ORG/$repo/compare/$base...$(echo "$head_sha" | cut -c1-12)" \
-                --paginate --jq '[.commits[] | select(.parents | length == 1) | {sha: .sha, message: .commit.message | split("\n")[0]}]' 2>/dev/null || echo '[]')
+                --paginate 2>/dev/null \
+                | jq -s 'map(.commits) | add | [.[] | select(.parents | length == 1) | {sha: .sha, message: .commit.message | split("\n")[0]}]' 2>/dev/null || echo '[]')
             else
               subjects=$(gh api "repos/$ORG/$repo/commits?sha=$head_sha&per_page=100" \
-                --paginate --jq '[.[] | select(.parents | length == 1) | {sha: .sha, message: .commit.message | split("\n")[0]}]' 2>/dev/null || echo '[]')
+                --paginate 2>/dev/null \
+                | jq -s 'add | [.[] | select(.parents | length == 1) | {sha: .sha, message: .commit.message | split("\n")[0]}]' 2>/dev/null || echo '[]')
             fi
             [ "$ffirst" = "0" ] && echo ',' >> /tmp/fleet.json
             ffirst=0
@@ -102,10 +104,12 @@ jobs:
             base=$(jq -r --arg r "$repo" '.[$r] // ""' /tmp/train-state.json)
             if [ -n "$base" ] && [ -n "$LAST" ]; then
               subjects=$(gh api "repos/$ORG/$repo/compare/$base...$(echo "$head_sha" | cut -c1-12)" \
-                --paginate --jq '[.commits[] | select(.parents | length == 1) | {sha: .sha, message: .commit.message | split("\n")[0]}]' 2>/dev/null || echo '[]')
+                --paginate 2>/dev/null \
+                | jq -s 'map(.commits) | add | [.[] | select(.parents | length == 1) | {sha: .sha, message: .commit.message | split("\n")[0]}]' 2>/dev/null || echo '[]')
             else
               subjects=$(gh api "repos/$ORG/$repo/commits?sha=$head_sha&per_page=100" \
-                --paginate --jq '[.[] | select(.parents | length == 1) | {sha: .sha, message: .commit.message | split("\n")[0]}]' 2>/dev/null || echo '[]')
+                --paginate 2>/dev/null \
+                | jq -s 'add | [.[] | select(.parents | length == 1) | {sha: .sha, message: .commit.message | split("\n")[0]}]' 2>/dev/null || echo '[]')
             fi
             [ "$efirst" = "0" ] && echo ',' >> /tmp/expansion.json
             efirst=0
