@@ -287,23 +287,6 @@ jobs:
           tar --exclude='*/.git' -czf "dist/opurom-full-$VER.tar.gz" -C /tmp/full "opurom-$VER"
           ls -la dist/
 
-      - name: Generate and sign the OTA update-channel manifest
-        env:
-          OPUROM_CHANNEL_KEY: ${{ secrets.OPUROM_CHANNEL_KEY }}
-        run: |
-          set -euo pipefail
-          TAG="${{ needs.evaluate.outputs.tag }}"
-          VER="${TAG#v}"
-          # The signed channel manifest points at the full framework bundle; the
-          # OTA client fetches the bundle and compares it against bundleSha256.
-          node tools/channel-manifest.mjs \
-            --tag "$TAG" \
-            --bundle "dist/opurom-full-$VER.tar.gz" \
-            --out dist
-          # The detached signature is keyed by the manifest asset name; the
-          # client verifies it before trusting any field (spec §3.0.2).
-          ls -la dist/update-channel.json dist/update-channel.json.sig
-
       - name: Publish the train release
         uses: softprops/action-gh-release@v2
         with:
@@ -314,5 +297,3 @@ jobs:
           body_path: notes.md
           files: |
             dist/*.tar.gz
-            dist/update-channel.json
-            dist/update-channel.json.sig
